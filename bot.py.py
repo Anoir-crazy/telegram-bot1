@@ -1,114 +1,161 @@
-import logging, json, os, asyncio, nest_asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
 )
 from apscheduler.schedulers.background import BackgroundScheduler
+import nest_asyncio
+import logging
+import asyncio
+import json
+import os
 
-# ───────── إعدادات عامة ─────────
+# التوكن الخاص بك
 TOKEN = "8491265818:AAH3J0n-pebSFQUXdITRqA4MQ7YzYUbXzkg"
-DATA_FILE = "user_scores.json"
-POINT_VALUE = 1      # نقطة لكل رسالة نصية (يمكنك تغييره هنا)
 
-# ───────── إعداد سجلات اللوج ─────────
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# إعدادات النقاط
+POINTS_TEXT = 1
+POINTS_STICKER = 2
+POINTS_REPLY = 3
 
-# ───────── تحميل/حفظ النقاط ─────────
-def load_scores() -> dict:
-    if os.path.isfile(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+# مسار تخزين النقاط
+SCORES_FILE = "user_scores.json"
 
-def save_scores(scores: dict) -> None:
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(scores, f, ensure_ascii=False, indent=2)
+# المتغير العالمي لحفظ النقاط
+user_scores = {}
 
-user_scores: dict[str, int] = load_scores()
+# تحميل النقاط من ملف خارجي (إن وجد)
+def load_scores():
+    global user_scores
+    if os.path.exists(SCORES_FILE):
+        with open(SCORES_FILE, "r") as f:
+            user_scores.update(json.load(f))
 
-# ───────── حساب النقاط ─────────
-def add_point(user_id: str) -> None:
-    user_scores[user_id] = user_scores.get(user_id, 0) + POINT_VALUE
-    save_scores(user_scores)
+# حفظ النقاط في ملف خارجي
+def save_scores():
+    with open(SCORES_FILE, "w") as f:
+        json.dump(user_scores, f)
 
-# ───────── أوامر البوت ─────────
+# تهيئة السجل
+logging.basicConfig(level=logging.INFO)
+
+# أمر /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 أهلاً! أقيِّم نشاطكم تلقائيًا.\n"
-        "/top • أفضل 10 أعضاء\n"
-        "/myscore • نقاطك\n"
-        "/myrank • ترتيبك حاليًا"
-    )
+    await update.message.reply_text("👋 أهلاً بك! هذا البوت يقوم بتقييم نشاط الأعضاء يوميًا في المجموعة.")
 
-async def myscore(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    score = user_scores.get(uid, 0)
-    await update.message.reply_text(f"📊 نقاطك: {score}")
-
-async def myrank(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    if uid not in user_scores:
-        await update.message.reply_text("لم يُسجّل لك نشاط بعد.")
-        return
-    sorted_users = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)
-    rank = next(i for i, (u, _) in enumerate(sorted_users, 1) if u == uid)
-    await update.message.reply_text(f"🎖️ ترتيبك: {rank} / {len(sorted_users)}")
-
+# أمر /top
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_scores:
-        await update.message.reply_text("لا يوجد نشاط بعد.")
+        await update.message.reply_text("لا توجد نقاط بعد.")
         return
-    sorted_users = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)[:10]
-    text = "🏆 أفضل الأعضاء:\n"
-    for i, (uid, score) in enumerate(sorted_users, 1):
-        try:
-            member = await context.bot.get_chat_member(update.effective_chat.id, int(uid))
-            name = member.user.first_name
-        except Exception:
-            name = "مستخدم مجهول"
-        text += f"{i}. {name} — {score} نقطة\n"
-    await update.message.reply_text(text)
 
-# ───────── معالجة كل الرسائل (بدون ردّ) ─────────
+    sorted_scores = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)
+    top_users = sorted_scores[:5]
+
+    msg = "🏆 أفضل 5 أعضاء اليوم:\n"
+    for i, (user_id, score) in enumerate(top_users, 1):
+        member = await context.bot.get_chat_member(update.effective_chat.id, int(user_id))
+        username = member.user.first_name
+        msg += f"{i}. {username} - {score} نقطة\n"
+
+    await update.message.reply_text(msg)
+
+# أمر /myrank
+async def myrank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    if user_id not in user_scores:
+        await update.message.reply_text("ليس لديك نقاط حتى الآن.")
+        return
+
+    sorted_users = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)
+    rank = next((i + 1 for i, (uid, _) in enumerate(sorted_users) if uid == user_id), None)
+    score = user_scores[user_id]
+    await update.message.reply_text(f"📊 ترتيبك: {rank}\n✨ نقاطك: {score}")
+
+# أمر /reset للمشرفين فقط
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    if member.status not in ("administrator", "creator"):
+        await update.message.reply_text("❌ فقط المشرفين يمكنهم تصفير النقاط.")
+        return
+
+    user_scores.clear()
+    save_scores()
+    await update.message.reply_text("✅ تم تصفير جميع النقاط بنجاح.")
+
+# استقبال الرسائل وتسجيل النقاط
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user and update.message:
-        add_point(str(update.effective_user.id))
+    user_id = str(update.message.from_user.id)
 
-# ───────── تصفير يومي للنقاط ─────────
-def daily_reset():
-    global user_scores
-    if user_scores:
-        logging.info("⏰ تصفير النقاط اليومي")
-        user_scores = {}
-        save_scores(user_scores)
+    points = 0
+    if update.message.text:
+        points += POINTS_TEXT
+    if update.message.sticker:
+        points += POINTS_STICKER
+    if update.message.reply_to_message:
+        points += POINTS_REPLY
 
-scheduler = BackgroundScheduler()
-scheduler.add_job(daily_reset, "cron", hour=0, minute=0)
-scheduler.start()
+    user_scores[user_id] = user_scores.get(user_id, 0) + points
+    save_scores()
 
-# ───────── الدالة الرئيسية ─────────
+# إرسال التقرير اليومي وإعادة تعيين النقاط
+async def reset_scores_and_send_top(app):
+    if not user_scores:
+        return
+
+    chat_ids = set()  # جمع كل المجموعات اللي تفاعل فيها البوت
+    for update in app.update_queue.queue:
+        if update.effective_chat:
+            chat_ids.add(update.effective_chat.id)
+
+    sorted_scores = sorted(user_scores.items(), key=lambda x: x[1], reverse=True)
+    top_users = sorted_scores[:5]
+
+    msg = "📅 تقرير النشاط اليومي:\n"
+    for i, (user_id, score) in enumerate(top_users, 1):
+        try:
+            member = await app.bot.get_chat_member(list(chat_ids)[0], int(user_id))
+            username = member.user.first_name
+            msg += f"{i}. {username} - {score} نقطة\n"
+        except:
+            continue
+
+    for chat_id in chat_ids:
+        await app.bot.send_message(chat_id=chat_id, text=msg)
+
+    user_scores.clear()
+    save_scores()
+
+# المهمة المجدولة يومياً
+def schedule_daily_reset(app):
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(
+        lambda: asyncio.create_task(reset_scores_and_send_top(app)),
+        trigger="cron",
+        hour=23,
+        minute=55,
+        id="daily_reset",
+    )
+    scheduler.start()
+
+# الدالة الرئيسية
 async def main():
+    load_scores()
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("myscore", myscore))
-    app.add_handler(CommandHandler("myrank", myrank))
     app.add_handler(CommandHandler("top", top))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("myrank", myrank))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(MessageHandler(filters.ALL, handle_message))
 
-    print("🚀 البوت قيد التشغيل…")
+    schedule_daily_reset(app)
     await app.run_polling()
 
-# ───────── تشغيل البوت بأمان مع nest_asyncio ─────────
-if __name__ == "__main__":
-    nest_asyncio.apply()           # يسمح بإعادة استخدام الحدث على ويندوز/بيئات تفاعلية
-    if asyncio.get_event_loop().is_running():
-        # بيئة يوجد بها event loop مسبقًا (Jupyter مثلًا)
-        asyncio.create_task(main())
-    else:
-        asyncio.run(main())
+# تشغيل البوت
+nest_asyncio.apply()
+asyncio.run(main())
